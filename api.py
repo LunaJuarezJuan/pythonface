@@ -1,50 +1,73 @@
-from flask import Flask, request, jsonify
+import sys
 import face_recognition
-import cv2
 import psycopg2
-import numpy as np
 from dotenv import load_dotenv
 import os
+import hashlib
 
-# Cargar variables de entorno
 load_dotenv()
 
-# Conectar a la base de datos
-conn = psycopg2.connect(
-    host=os.getenv("DB_HOST"),
-    port=os.getenv("DB_PORT"),
-    dbname=os.getenv("DB_NAME"),
-    user=os.getenv("DB_USER"),
-    password=os.getenv("DB_PASSWORD")
-)
-cursor = conn.cursor()
+def hash_password(password):
+    return hashlib.sha256(password.encode()).hexdigest()
 
-# Inicializar Flask
-app = Flask(__name__)
+def get_or_create_usuario(nombre, correo, contrasena, cursor, conn):
+    cursor.execute("SELECT id_usuario FROM usuarios WHERE correo = %s", (correo,))
+    result = cursor.fetchone()
+    if result:
+        return result[0]
 
-@app.route('/guardar_vectores', methods=['POST'])
-def guardar_vectores():
-    # Se espera recibir una imagen codificada en base64
-    data = request.json
-    image_data = data['image']  # Asume que la imagen está en base64
-    nombre = data['nombre']
+    contrasena_hash = hash_password(contrasena)
+    cursor.execute(
+        "INSERT INTO usuarios (nombre_completo, correo, contrasena_hash) VALUES (%s, %s, %s) RETURNING id_usuario",
+        (nombre, correo, contrasena_hash)
+    )
+    id_usuario = cursor.fetchone()[0]
+    conn.commit()
+    return id_usuario
 
-    # Decodificar la imagen base64
-    img_bytes = base64.b64decode(image_data)
-    np_arr = np.frombuffer(img_bytes, np.uint8)
-    img = cv2.imdecode(np_arr, cv2.IMREAD_COLOR)
+def guardar_vectores(id_usuario, vectores, cursor, conn):
+    for encoding in vectores:
+        cursor.execute(
+            "INSERT INTO vectores_faciales (id_usuario, vector) VALUES (%s, %s)",
+            (id_usuario, [float(x) for x in encoding])
+        )
+    conn.commit()
 
-    rgb_frame = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
-    face_locations = face_recognition.face_locations(rgb_frame)
-    face_encodings = face_recognition.face_encodings(rgb_frame, face_locations)
+def main():
+    if len(sys.argv) < 5:
+        print("Uso: python api.py <ruta_imagen> <nombre_completo> <correo> <contrasena>")
+        sys.exit(1)
+
+    image_path = sys.argv[1]
+    nombre = sys.argv[2]
+    correo = sys.argv[3]
+    contrasena = sys.argv[4]
+
+    conn = psycopg2.connect(
+        host=os.getenv("DB_HOST"),
+        port=os.getenv("DB_PORT"),
+        dbname=os.getenv("DB_NAME"),
+        user=os.getenv("DB_USER"),
+        password=os.getenv("DB_PASSWORD")
+    )
+    cursor = conn.cursor()
+
+    id_usuario = get_or_create_usuario(nombre, correo, contrasena, cursor, conn)
+    print(f"Usuario con id {id_usuario} listo.")
+
+    image = face_recognition.load_image_file(image_path)
+    face_encodings = face_recognition.face_encodings(image)
+
+    print(f"Se detectaron {len(face_encodings)} rostros.")
 
     if face_encodings:
-        for encoding in face_encodings:
-            cursor.execute("INSERT INTO rostros (nombre, vector) VALUES (%s, %s)", (nombre, [float(x) for x in encoding]))
-        conn.commit()
-        return jsonify({"message": f"✅ {nombre} guardado con {len(face_encodings)} vector(es).", "status": "success"}), 200
+        guardar_vectores(id_usuario, face_encodings, cursor, conn)
+        print(f"Vectores guardados para usuario {nombre}.")
     else:
-        return jsonify({"message": "⚠️ No se detectó ningún rostro.", "status": "error"}), 400
+        print("No se detectaron rostros.")
 
-if __name__ == '__main__':
-    app.run(debug=True, host='0.0.0.0', port=5000)
+    cursor.close()
+    conn.close()
+    
+if __name__ == "__main__":
+    main()
