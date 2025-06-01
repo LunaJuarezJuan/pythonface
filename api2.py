@@ -16,6 +16,7 @@ conn = psycopg2.connect(
     user=os.getenv("DB_USER"),
     password=os.getenv("DB_PASSWORD")
 )
+
 cursor = conn.cursor()
 
 def obtener_sesion_activa():
